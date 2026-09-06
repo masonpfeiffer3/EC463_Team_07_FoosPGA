@@ -1,16 +1,15 @@
-# 02-Team Repo
+# 07-Team Repo
 Template for team repo
 
 <p align="center">
 <img src="./images/thisismyteam.png" width="50%">
 </p>
 <p align="center">
-Replace this image with your team's photo here
 </p>
 
 ## Team links
-- [Team Google Drive]()
-- [Team Board]()
+- [Team Google Drive](https://drive.google.com/drive/u/1/folders/1HSWW8e8HxwHPLZcLo6FfCO6m2fV2Ahi7)
+- [Team Board (view only)](https://tricolor-tangelo-ba0.notion.site/Project-Board-93c434590cf08326806a0148ea42d194?source=copy_link)
 
 ## Organization of this repo
 
