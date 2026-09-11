@@ -8,7 +8,7 @@
 ## 1. Scope
 
 This document defines the physical and logical interface between the
-controller (KV260 Pmod, or the Tiny Tapeout ASIC, or the ESP32 fallback) and
+controller (KV260 Pmod, or the ESP32 fallback) and
 the motor interface PCB. It is the contract that lets the PCB and the RTL be
 designed in parallel by different people.
 
