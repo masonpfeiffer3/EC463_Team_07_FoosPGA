@@ -52,7 +52,7 @@ Encoder chip-selects are **not** Pmod pins. They are bits in the output word
 ## 3. Alternate controller header
 
 The PCB carries a second header exposing the same 8 signals plus GND and a
-3.3 V input, for the Tiny Tapeout board or an ESP32-S3. **Only one controller
+3.3 V input, for an ESP32-S3. **Only one controller
 header may be populated/connected at a time**; there is no arbitration and no
 bus contention protection.
 
