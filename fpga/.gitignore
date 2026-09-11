@@ -1,0 +1,20 @@
+# Vivado generated
+vivado/build/
+*.jou
+*.log
+*.str
+.Xil/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+NA/
+
+# Sim
+sim_build/
+results.xml
+*.vcd
+*.fst
+__pycache__/
