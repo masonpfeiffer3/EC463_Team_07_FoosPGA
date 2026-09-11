@@ -10,8 +10,7 @@
 > **The motor control core is vendor-neutral RTL. Everything AMD-specific
 > lives in a wrapper above it.**
 
-This single constraint is what makes the Tiny Tapeout path possible without a
-rewrite, what makes the ESP32 fallback a wiring change rather than a redesign,
+This single constraint is what makes the ESP32 fallback a wiring change rather than a redesign,
 and what keeps the core simulatable in Verilator without a Vivado licence. If
 a decision anywhere in this document conflicts with it, this rule wins.
 
