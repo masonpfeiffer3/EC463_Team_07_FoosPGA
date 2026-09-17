@@ -9,50 +9,33 @@ Template for team repo
 
 ## Team links
 - [Team Google Drive](https://drive.google.com/drive/u/1/folders/1HSWW8e8HxwHPLZcLo6FfCO6m2fV2Ahi7)
-- [Team Board (view only)](https://tricolor-tangelo-ba0.notion.site/Project-Board-93c434590cf08326806a0148ea42d194?source=copy_link)
+- [Team Board](https://app.notion.com/p/Team07_ProjectBoard-3da2b21b7a028070acded2745a7e6e01?source=copy_link)
 
 ## Organization of this repo
 
-This depends on your set of roles. Try these queries to set up
-your initial repo. You can always change this later.
+Target hardware is the AMD/Xilinx Kria KV260, which has three programmable
+tiles plus a display-only GPU. Each computer engineering folder below maps to
+one tile, with its own toolchain and build output. The PL (FPGA fabric) is
+the dependency root — its Vivado output (bitstream + XSA) is what the RPU
+firmware build and the Linux device-tree overlay build against — so changes
+there should land before RPU/APU integration follows.
 
-- "What is a good organization of a repo for a team of two electrical engineers, two computer engineers, and one mechanical engineer? The team is undertaking the design and build of an embedded system and mechanicals for and electronic cat feeder project"
+- **`Computer_VerilogRTL`** — PL tile (FPGA fabric). Verilog/RTL and HLS
+  sources built in Vivado/Vitis, producing the bitstream and hardware
+  description (XSA).
+- **`Computer_RTOSControl`** — RPU tile (Cortex-R5F, bare-metal/RTOS).
+  Hard-real-time control code built in Vitis, loaded onto the R5 cores by
+  Linux via remoteproc. Used for timing-critical control loops (e.g. rod
+  actuation) that can't tolerate Linux scheduling jitter.
+- **`Computer_LinuxCore`** — APU tile (Cortex-A53, Linux). Application logic,
+  orchestration, and pre/post-processing running as normal userspace
+  software under Ubuntu on the KV260.
+- **`Electrical_SystemArchitecture`** — system-level wiring, power
+  distribution, sensor/motor driver schematics, and pinout documentation
+  tying the KV260 to the rest of the electronics.
+- **`Mechanical_RodActuation`** — CAD, drawings, and design files for the
+  rod actuation mechanism (motor/linkage mounts, rod guides, enclosure).
 
-
-As in your individual repo, you can customize your based on your preferred tools (e.g., CAD
-software, IDE, etc.)
-
-Example:
-
-```
-├── hardware/                  # Electrical Engineering (EE)
-│   ├── schematics/            # Circuit diagrams, block diagrams, design files
-│   ├── pcb/                   # PCB layout, Gerber files, drill files
-│   ├── bom/                   # Bill of Materials (components, suppliers, costs)
-│   └── simulation/            # SPICE simulations, power budget models
-│
-├── firmware/                  # Computer Engineering (CE/Software)
-│   ├── src/                   # Source code (.c, .cpp, etc.)
-│   ├── include/               # Header files (.h, .hpp)
-│   ├── lib/                   # External libraries and vendor drivers
-│   ├── tests/                 # Unit tests, integration tests
-│   └── build/                 # Build output / configuration files (PlatformIO/CMake)
-│
-├── mechanical/                # Mechanical Engineering (ME)
-│   ├── cad/                   # 3D models (STEP, SLDPRT, Fusion 360 archives)
-│   ├── drawings/              # 2D technical drawings, dimensioned PDFs
-│   ├── 3d_print/              # STL/3MF files for fast prototyping
-│   └── renders/               # Product renders and enclosure mockups
-│
-├── docs/                      # Shared Project Documentation
-│   ├── architecture/          # Pinout tables, system wiring, block diagrams
-│   └── datasheets/            # Component PDFs (ICs, sensors, motors)
-│
-├── scripts/                   # Shared Automation & Utilities
-│   ├── flashing/              # Flash/programming scripts
-│   └── tests/                 # Hardware-in-the-loop / test automation scripts
-│
-├── .gitignore                 # Ignore generated files (binaries, Gerber zips, CAD locks)
-└── README.md                  # Project overview, setup guides, and team roles
-```
+The rest of the layout (packaging of the Kria "accelerated application"
+bundle, shared docs, scripts) is still TBD.
 
