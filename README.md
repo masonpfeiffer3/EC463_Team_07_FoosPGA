@@ -9,7 +9,7 @@ Template for team repo
 
 ## Team links
 - [Team Google Drive](https://drive.google.com/drive/u/1/folders/1HSWW8e8HxwHPLZcLo6FfCO6m2fV2Ahi7)
-- [Team Board (view only)](https://tricolor-tangelo-ba0.notion.site/Project-Board-93c434590cf08326806a0148ea42d194?source=copy_link)
+- [Team Board (view only)](https://app.notion.com/p/Team07_ProjectBoard-3da2b21b7a028070acded2745a7e6e01?source=copy_link)
 
 ## Organization of this repo
 
