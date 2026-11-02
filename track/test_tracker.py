@@ -112,5 +112,45 @@ def main():
     print("PASS")
 
 
+def flicker_test():
+    """
+    A still ball seen on only 2 of every 3 frames (poor light) must still be
+    confirmed, ride out a 1.25 s disappearance (slow coast + reacquire window),
+    and be picked up again near where it vanished, not at a ball-sized
+    distractor elsewhere on the table.
+    """
+    rng = np.random.default_rng(2)
+    background = [noisy(BASE, rng) for _ in range(30)]
+    det = BallDetector(DetectorConfig(mode="diff", thresh=30, min_area=12, max_area=400))
+    det.learn_background(background)
+    trk = BallTracker(det, TrackerConfig(ball_area=math.pi * R * R))
+
+    ball, moved, decoy = (200.0, 60.0), (210.0, 64.0), (60.0, 20.0)
+    hide = range(400, 900)                       # 1.25 s: longer than the slow coast
+    states = []
+    for i in range(1100):
+        img = BASE.copy()
+        if i < 400 and i % 3 != 2:
+            draw_ball(img, ball)
+        elif i >= 900:
+            draw_ball(img, moved)
+        if i >= 850:
+            draw_ball(img, decoy)                # appears before the ball comes back
+        s = trk.update(noisy(img, rng), i / FPS)
+        states.append(s)
+
+    first_track = next((i for i, s in enumerate(states) if s.state == TRACK), None)
+    coasting = sum(states[i].state == COAST for i in hide)
+    end = states[-1]
+    print(f"flicker: first TRACK at frame {first_track}   coasted {coasting} of "
+          f"{len(hide)} hidden frames   final {end.state} at ({end.x:.1f}, {end.y:.1f})")
+    assert first_track is not None and first_track < 10, "flickering ball never confirmed"
+    assert coasting > 0.7 * FPS, "slow ball did not get the long coast"
+    assert end.state == TRACK and math.hypot(end.x - moved[0], end.y - moved[1]) < 1.5, \
+        "did not reacquire the ball near where it was lost"
+    print("PASS")
+
+
 if __name__ == "__main__":
     main()
+    flicker_test()

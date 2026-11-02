@@ -195,8 +195,13 @@ class TrackerConfig:
     size_weight: float = 2.0      # how much area mismatch counts when picking among candidates
     gate_chi2: float = 9.21       # 99% Mahalanobis gate for 2 DOF
     gate_min_px: float = 12.0     # ...but always accept candidates this close to the prediction
-    confirm_hits: int = 3         # consecutive-ish detections before trusting a new track
-    coast_time_s: float = 0.30    # give up and re-search after this long without a measurement
+    confirm_hits: int = 3         # detections needed before trusting a new track...
+    tentative_max_misses: int = 2 # ...with up to this many missed frames along the way
+    coast_time_s: float = 0.30    # give up after this long without a measurement...
+    coast_time_slow_s: float = 1.0  # ...or this long if the ball was slower than slow_speed
+    slow_speed: float = 150.0     # px/s; a stopped or rolling ball is likely just hidden
+    reacquire_time_s: float = 0.5 # after a lost track, search only near where it was lost...
+    reacquire_pad_px: int = 40    # ...in a box around the last measurement and final prediction
     roi_min_px: int = 24          # search window half-size floor
     roi_speed_k: float = 2.0      # window grows by this x (speed * time since last measurement)
     dt_min: float = 1e-4
@@ -216,11 +221,15 @@ class TrackState:
 
 class BallTracker:
     """
-    SEARCH    no track: full-frame detection each frame.
-    TENTATIVE first detection seen; needs confirm_hits to become a track.
+    SEARCH    no track: full-frame detection each frame, except for the first
+              reacquire_time_s after losing a track, when only the area where
+              it was lost is searched.
+    TENTATIVE first detection seen; needs confirm_hits (allowing up to
+              tentative_max_misses missed frames) to become a track.
     TRACK     detection inside the predicted window updated the filter.
     COAST     no usable detection; output is the filter's prediction.
-    After coast_time_s without a measurement the track is dropped to SEARCH.
+    After coast_time_s without a measurement (coast_time_slow_s if the ball
+    was slower than slow_speed) the track is dropped to SEARCH.
 
     Pass your own BallKalman via `kalman`, otherwise one is built with `bounds`.
     """
@@ -234,10 +243,28 @@ class BallTracker:
     def reset(self):
         self.state = SEARCH
         self.hits = 0
+        self.misses = 0
         self.last_stamp = None
         self.last_meas = None
+        self.last_z = None         # last measured (x, y)
         self.last_roi = None       # search window used on the last frame (None = full frame)
         self.last_cands = []       # every blob the detector returned on the last frame
+        self.lost = None           # (roi, stamp) of the last lost track, for reacquiring
+
+    def _lose(self, stamp, w, h):
+        """Drop to SEARCH, remembering where to look first."""
+        if self.state == TENTATIVE:
+            lost = self.lost       # unconfirmed: keep the window it was found in, if any
+        else:
+            p = self.cfg.reacquire_pad_px
+            (mx, my), (px, py) = self.last_z, self.kf.x[:2]
+            x0 = int(min(max(math.floor(min(mx, px) - p), 0), w - 1))
+            y0 = int(min(max(math.floor(min(my, py) - p), 0), h - 1))
+            x1 = int(min(max(math.ceil(max(mx, px) + p), x0 + 1), w))
+            y1 = int(min(max(math.ceil(max(my, py) + p), y0 + 1), h))
+            lost = ((x0, y0, x1, y1), stamp)
+        self.reset()
+        self.lost = lost
 
     # -- helpers -------------------------------------------------------------
 
@@ -278,14 +305,21 @@ class BallTracker:
         h, w = gray.shape[:2]
 
         if self.state == SEARCH:
-            cands = self.det.detect(gray)
-            self.last_roi, self.last_cands = None, cands
+            roi = None
+            if self.lost is not None:
+                if stamp - self.lost[1] <= c.reacquire_time_s:
+                    roi = self.lost[0]
+                else:
+                    self.lost = None
+            cands = self.det.detect(gray, roi)
+            self.last_roi, self.last_cands = roi, cands
             if not cands:
                 return TrackState(stamp, SEARCH)
             cx, cy, _ = min(cands, key=lambda k: self._size_cost(k[2]))
             self.kf.init((cx, cy))
-            self.state, self.hits = TENTATIVE, 1
+            self.state, self.hits, self.misses = TENTATIVE, 1, 0
             self.last_stamp = self.last_meas = stamp
+            self.last_z = (cx, cy)
             return self._out(stamp, True)
 
         dt = min(max(stamp - self.last_stamp, c.dt_min), c.dt_max)
@@ -299,19 +333,24 @@ class BallTracker:
         if z is not None:
             self.kf.update(z)
             self.last_meas = stamp
+            self.last_z = z
             self.hits += 1
             if self.state == TENTATIVE:
                 if self.hits >= c.confirm_hits:
-                    self.state = TRACK
+                    self.state, self.lost = TRACK, None
             else:
                 self.state = TRACK
             return self._out(stamp, True)
 
-        if self.state == TENTATIVE:                 # never confirmed: start over
-            self.reset()
-            return TrackState(stamp, SEARCH)
-        if stamp - self.last_meas > c.coast_time_s:  # coasted too long: re-search
-            self.reset()
+        if self.state == TENTATIVE:
+            self.misses += 1
+            if self.misses > c.tentative_max_misses:  # never confirmed: start over
+                self._lose(stamp, w, h)
+                return TrackState(stamp, SEARCH)
+            return self._out(stamp, False)
+        slow = math.hypot(self.kf.x[2], self.kf.x[3]) < c.slow_speed
+        if stamp - self.last_meas > (c.coast_time_slow_s if slow else c.coast_time_s):
+            self._lose(stamp, w, h)                   # coasted too long: re-search
             return TrackState(stamp, SEARCH)
         self.state = COAST
         return self._out(stamp, False)
