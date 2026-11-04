@@ -1,0 +1,66 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * cam_track.dtsi -- device-tree overlay for the Stage 3 bitstream.
+ *
+ * Same as cam_stream.dtsi. Only the bitstream name changed.
+ * The new AXI GPIO and frame BRAM get NO nodes on purpose: no Linux driver
+ * should touch them. track_server.py reaches them through /dev/mem, the same
+ * way csi_status.py reads the CSI-2 receiver.
+ *
+ * Build and install:
+ *   dtc -@ -O dtb -o cam_track.dtbo cam_track.dtsi
+ */
+
+/ {
+    /* ---- Part 1: which bitstream to load into the FPGA ---- */
+    fragment@0 {
+        target = <&fpga_full>;
+        __overlay__ {
+            firmware-name = "cam_track.bit.bin";
+            resets = <&zynqmp_reset 116>;        /* FPGA reset line 0 */
+        };
+    };
+
+    /* ---- Part 2: what hardware is inside that bitstream ---- */
+    fragment@1 {
+        target = <&amba>;
+        __overlay__ {
+            #address-cells = <2>;
+            #size-cells = <2>;
+
+            /* pl_clk0 = 100 MHz: AXI clock (I2C, CSI-2 registers, GPIO, BRAM read side) */
+            clocking0: clocking0 {
+                compatible = "xlnx,fclk";
+                clocks = <&zynqmp_clk 71>;       /* 71 = PL0 clock */
+                clock-output-names = "fabric_clk";
+                #clock-cells = <0>;
+                assigned-clocks = <&zynqmp_clk 71>;
+                assigned-clock-rates = <100000000>;
+            };
+
+            /* pl_clk1 = 200 MHz: D-PHY clock + video stream clock */
+            clocking1: clocking1 {
+                compatible = "xlnx,fclk";
+                clocks = <&zynqmp_clk 72>;       /* 72 = PL1 clock */
+                clock-output-names = "video_clk";
+                #clock-cells = <0>;
+                assigned-clocks = <&zynqmp_clk 72>;
+                assigned-clock-rates = <200000000>;
+            };
+
+            /* The AXI IIC block (unchanged) */
+            axi_iic_0: i2c@b0000000 {
+                compatible = "xlnx,axi-iic-2.1", "xlnx,xps-iic-2.00.a";
+                reg = <0x0 0xb0000000 0x0 0x10000>;
+                clocks = <&zynqmp_clk 71>;
+                clock-names = "s_axi_aclk";
+                interrupt-parent = <&gic>;
+                interrupts = <0 89 4>;           /* pl_ps_irq0[0] = interrupt 89 */
+                #address-cells = <1>;
+                #size-cells = <0>;
+            };
+        };
+    };
+};

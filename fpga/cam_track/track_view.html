@@ -1,0 +1,182 @@
+<!doctype html>
+<!--
+  track_view.html -- the live view page served by track_server.py
+  (keep it in the same folder as track_server.py)
+
+  It asks the server for the newest frame over and over (/frame), draws the
+  pixels on a canvas, and marks the ball and its recent path on top.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FoosPGA Live Tracking</title>
+<style>
+  :root {
+    --bg: #101214; --panel: #1a1d21; --line: #2b3036; --text: #e7eaee;
+    --muted: #8c95a0; --ball: #ff5a36; --trail: #ffb020; --ok: #37c477; --bad: #ff5a5a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #status { font-size: 13px; color: var(--muted); }
+  #status.ok::before  { content: "\25CF "; color: var(--ok); }
+  #status.bad::before { content: "\25CF "; color: var(--bad); }
+  canvas {
+    width: 100%; height: auto; max-height: 78vh; object-fit: contain; display: block; background: #000;
+    border: 1px solid var(--line); border-radius: 6px; image-rendering: pixelated;
+  }
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 8px; margin: 12px 0;
+  }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
+  }
+  label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  input[type=range] { width: 180px; }
+  button {
+    background: #2a3038; color: var(--text); border: 1px solid #3a414b;
+    border-radius: 5px; padding: 6px 10px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #343b45; }
+  #error { color: var(--bad); margin-top: 10px; min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>FoosPGA live tracking</h1>
+    <div id="status">connecting&hellip;</div>
+  </header>
+
+  <canvas id="view" width="640" height="400"></canvas>
+
+  <div class="stats">
+    <div class="stat"><b id="pos">&ndash;</b><span>ball position (px)</span></div>
+    <div class="stat"><b id="vel">&ndash;</b><span>speed (px/s)</span></div>
+    <div class="stat"><b id="fps">&ndash;</b><span>tracked frames/s</span></div>
+    <div class="stat"><b id="vfps">&ndash;</b><span>view frames/s</span></div>
+    <div class="stat"><b id="ms">&ndash;</b><span>grab / track (ms)</span></div>
+    <div class="stat"><b id="px">&ndash;</b><span>ball pixels</span></div>
+  </div>
+
+  <div class="controls">
+    <label>threshold
+      <input id="thresh" type="range" min="0" max="255" value="200">
+      <output id="threshval">200</output>
+    </label>
+    <button id="bgset" title="Take a picture with NO ball in view; then the tracker looks for what changed">
+      Set background (no ball in view)</button>
+    <button id="bgclear">Clear background</button>
+    <label><input id="half" type="checkbox"> half-size view (less network)</label>
+  </div>
+
+  <div id="error"></div>
+</main>
+
+<script>
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+const $ = (id) => document.getElementById(id);
+
+let image = null;            // ImageData we reuse between frames
+let viewCount = 0, viewT = performance.now();
+let threshTouched = 0;       // don't overwrite the slider while it's being dragged
+
+function draw(pixels, st) {
+  // pixels: 8-bit gray, st.w x st.h. Canvas needs RGBA.
+  if (!image || image.width !== st.w || image.height !== st.h) {
+    canvas.width = st.w; canvas.height = st.h;
+    image = ctx.createImageData(st.w, st.h);
+  }
+  const d = image.data;
+  for (let i = 0, j = 0; i < pixels.length; i++, j += 4) {
+    d[j] = d[j + 1] = d[j + 2] = pixels[i];
+    d[j + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+
+  // overlay, in full-size (640x400) coordinates
+  const s = st.w / (st.fw || 640);   // overlay coords are in full-res (cropped) pixels
+  ctx.save();
+  ctx.scale(s, s);
+  if (st.trail && st.trail.length > 1) {
+    ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--trail").trim();
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    st.trail.forEach(([x, y], k) => k ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.stroke();
+  }
+  if (st.found) {
+    ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--ball").trim();
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(st.x, st.y, 14, 0, 2 * Math.PI); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(st.x - 22, st.y); ctx.lineTo(st.x - 8, st.y);
+    ctx.moveTo(st.x + 8, st.y);  ctx.lineTo(st.x + 22, st.y);
+    ctx.moveTo(st.x, st.y - 22); ctx.lineTo(st.x, st.y - 8);
+    ctx.moveTo(st.x, st.y + 8);  ctx.lineTo(st.x, st.y + 22);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function showStats(st) {
+  $("pos").textContent = st.found ? `${st.x.toFixed(0)}, ${st.y.toFixed(0)}` : "not found";
+  $("vel").textContent = st.found ? `${Math.round(Math.hypot(st.vx, st.vy))}` : "–";
+  $("fps").textContent = st.fps ?? "–";
+  $("ms").textContent = st.grab_ms != null ? `${st.grab_ms} / ${st.track_ms}` : "–";
+  $("px").textContent = st.pixels ?? "–";
+  if (performance.now() - threshTouched > 1500 && st.thresh != null) {
+    $("thresh").value = st.thresh; $("threshval").textContent = st.thresh;
+  }
+  $("bgset").textContent = st.background ? "Retake background" : "Set background (no ball in view)";
+  $("error").textContent = st.error || "";
+  $("status").textContent = st.error ? "camera problem" : (st.background ? "live · background mode" : "live · brightness mode");
+  $("status").className = st.error ? "bad" : "ok";
+}
+
+async function loop() {
+  while (true) {
+    try {
+      const r = await fetch("/frame" + ($("half").checked ? "?scale=2" : ""), { cache: "no-store" });
+      const st = JSON.parse(r.headers.get("X-State"));
+      const pixels = new Uint8Array(await r.arrayBuffer());
+      draw(pixels, st);
+      showStats(st);
+      viewCount++;
+      const now = performance.now();
+      if (now - viewT > 1000) {
+        $("vfps").textContent = (viewCount * 1000 / (now - viewT)).toFixed(1);
+        viewCount = 0; viewT = now;
+      }
+    } catch (e) {
+      $("status").textContent = "no connection to the Kria";
+      $("status").className = "bad";
+      await new Promise((ok) => setTimeout(ok, 1000));
+    }
+  }
+}
+
+$("thresh").addEventListener("input", (e) => {
+  threshTouched = performance.now();
+  $("threshval").textContent = e.target.value;
+  fetch("/set?thresh=" + e.target.value);
+});
+$("bgset").addEventListener("click", () => fetch("/set?background=1"));
+$("bgclear").addEventListener("click", () => fetch("/set?background=0"));
+
+loop();
+</script>
+</body>
+</html>
