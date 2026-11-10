@@ -204,6 +204,11 @@ class TrackerConfig:
     reacquire_pad_px: int = 40    # ...in a box around the last measurement and final prediction
     roi_min_px: int = 24          # search window half-size floor
     roi_speed_k: float = 2.0      # window grows by this x (speed * time since last measurement)
+    rod_zones: tuple = ()         # ((x0, y0, x1, y1), ...): the rod rectangles your mask already uses
+    rod_dwell_margin_px: float = 6.0  # a measurement this close to a rectangle counts as "on" it
+                                      # (heads poke out past a thin rod mask)
+    rod_dwell_s: float = 0.4      # a track on the same rod this long is a head: drop it
+                                  # (a real ball crosses a rod in a few ms)
     dt_min: float = 1e-4
     dt_max: float = 0.1
 
@@ -231,6 +236,11 @@ class BallTracker:
     After coast_time_s without a measurement (coast_time_slow_s if the ball
     was slower than slow_speed) the track is dropped to SEARCH.
 
+    Rod dwell: a track whose measurements stay within rod_dwell_margin_px of
+    the same rod rectangle (cfg.rod_zones) for rod_dwell_s is a player head,
+    so it is dropped with no reacquire window (which would just grab the
+    same head again).
+
     Pass your own BallKalman via `kalman`, otherwise one is built with `bounds`.
     """
 
@@ -250,6 +260,16 @@ class BallTracker:
         self.last_roi = None       # search window used on the last frame (None = full frame)
         self.last_cands = []       # every blob the detector returned on the last frame
         self.lost = None           # (roi, stamp) of the last lost track, for reacquiring
+        self.zone = None           # index of the rod zone the last measurement was in
+        self.zone_since = None     # stamp of the first consecutive measurement in that zone
+
+    def _zone_at(self, x, y):
+        """Index of the rod rectangle (x, y) is in or within the margin of, or None."""
+        m = self.cfg.rod_dwell_margin_px
+        for i, (x0, y0, x1, y1) in enumerate(self.cfg.rod_zones):
+            if x0 - m <= x <= x1 + m and y0 - m <= y <= y1 + m:
+                return i
+        return None
 
     def _lose(self, stamp, w, h):
         """Drop to SEARCH, remembering where to look first."""
@@ -331,6 +351,12 @@ class BallTracker:
         self.last_stamp = stamp
 
         if z is not None:
+            zi = self._zone_at(z[0], z[1])
+            if zi != self.zone:
+                self.zone, self.zone_since = zi, stamp
+            elif zi is not None and stamp - self.zone_since > c.rod_dwell_s:
+                self.reset()                          # parked on a rod: it's a head, not the
+                return TrackState(stamp, SEARCH)      # ball. No reacquire window on purpose.
             self.kf.update(z)
             self.last_meas = stamp
             self.last_z = z
