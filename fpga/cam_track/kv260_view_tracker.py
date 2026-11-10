@@ -125,7 +125,7 @@ def render_loop(det, grabber, live, args):
             gray, s, view, trail, info, show_mask, ready = snap
             img = render(gray, s, view, det, trail, info, args.scale, show_mask, ready)
             if grabber.error:
-                cv2.putText(img, "FPGA: " + grabber.error[:60], (8, 80),
+                cv2.putText(img, grabber.error[:70], (8, 80),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 255), 1, cv2.LINE_AA)
             ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
             if ok:

@@ -1,76 +1,57 @@
-# cam_track: live ball tracking on the KV260
+# cam_track (USB Arducam test branch)
 
-OV9281 camera → MIPI → FPGA (`frame_to_bram` copies one frame into block RAM on request) → Python on the ARM reads the frame through `/dev/mem`, tracks the ball, and serves a live view at `http://localhost:8080`.
-
-Full build steps: `claude/camera_stage3.md` (the Stage 3 guide) in the project.
+Arducam ezBOX VGA GS Mono (USB) → Python on the KV260's ARM → ball tracker → live view in a browser.
+No FPGA bitstream on this branch; the MIPI/OV9281 version lives on `ethan-manfredi`.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `cam_track.bit.bin` | FPGA bitstream (camera pipeline + frame_to_bram + AXI GPIO + frame BRAM) |
-| `cam_track.dtsi` | Device-tree overlay source: loads the bitstream, turns on pl_clk0 (100 MHz) and pl_clk1 (200 MHz) |
-| `shell.json` | Tells `xmutil` this is a flat (single-slot) design |
-| `ov9281_init.py` | Camera setup over I2C: 640 × 400 RAW10, frame length, exposure, gain, test pattern, start streaming |
-| `csi_status.py` | Reads the MIPI CSI-2 receiver's status and error registers (is the link healthy?) |
-| `track_server.py` | Quick tracker: grabs frames, finds the brightest/changed spot, serves the live page. Also `--snapshot` (save one frame) and `--fake` (no hardware) |
-| `track_view.html` | The web page `track_server.py` serves (keep it next to it) |
-| `kv260Frames.py` | `FrameGrabber` with the same interface as `cameraFrames.FrameGrabber`, but fed from the FPGA. Run it directly for a grab-rate benchmark |
-| `kv260_view_tracker.py` | Our real tracker (`tracker.py`, Kalman) with `view_tracker.render()`, shown as a live web page |
-| `tracker.py` | Ball detector + Kalman tracker (unchanged) |
-| `view_tracker.py` | Drawing (`render()`) and background learning, used by kv260_view_tracker (unchanged) |
-| `cameraFrames.py` | USB-camera version of the frame grabber; needed only because view_tracker imports it (unchanged) |
+| `Arducam_frames.py` | **Run this.** Live tracker viewer for the USB Arducam, served as a web page |
+| `cameraFrames.py` | Reads frames from the camera (V4L2, MJPEG decode) and sets exposure/gain. Run it directly for an fps/decode benchmark |
+| `tracker.py` | Ball detector + Kalman tracker |
+| `view_tracker.py` | Draws the overlay and learns the background (also a laptop viewer with an OpenCV window) |
+| `kv260_view_tracker.py` | Web page, tracking and render threads, used by `Arducam_frames.py` |
+| `kv260Frames.py` | MIPI frame source; unused here but imported by `kv260_view_tracker.py` |
 
-## One-time install on the Kria
+## One-time setup on the Kria
 
 ```
-cd ~/cam_track
-dtc -@ -O dtb -o cam_track.dtbo cam_track.dtsi
-sudo mkdir -p /lib/firmware/xilinx/cam_track
-sudo cp cam_track.bit.bin cam_track.dtbo shell.json /lib/firmware/xilinx/cam_track/
-sudo apt install python3-numpy python3-opencv     # if missing
+sudo apt install python3-numpy python3-opencv v4l-utils
+sudo usermod -aG video $USER          # then log out and back in
 ```
 
-After a new bitstream, only copy `cam_track.bit.bin` to `/lib/firmware/xilinx/cam_track/` again.
+Copy the folder from the laptop: `scp -r fpga/cam_track ubuntu@<kria-ip>:~/`
 
 ## Every session
 
+On the Kria:
 ```
-sudo xmutil unloadapp && sudo xmutil loadapp cam_track
-sudo python3 ov9281_init.py --vts 422 --gain 64      # camera on (after every loadapp)
-sudo python3 csi_status.py                           # optional: link check
-```
-
-Then pick one:
-
-```
-# quick check: save one frame as frame.png
-sudo python3 track_server.py --snapshot frame --crop 208:472
-
-# simple tracker + live view
-sudo python3 track_server.py --crop 208:472
-
-# our Kalman tracker + live view
-sudo python3 kv260_view_tracker.py --crop 208:472 --ball-radius 10 --min-area 40 --max-area 1600 --px-scale 2
+cd ~/cam_track
+v4l2-ctl --list-devices               # the Arducam is /dev/video0 (video1 is metadata)
+python3 cameraFrames.py --device 0 --width 640 --height 480 --fps 200 --seconds 5   # optional speed check
+python3 Arducam_frames.py --device 0
 ```
 
-Run only one tracker at a time. On the laptop, keep this open:
+On the laptop, in a second terminal (keep it open):
 ```
 ssh -L 8080:localhost:8080 ubuntu@<kria-ip>
 ```
-Then open **http://localhost:8080**. Clear the table and press **b** (or **Set background**) before tracking.
+Open **http://localhost:8080**. Clear the table and press **b** (learn background) before tracking.
 
-## Handy options
+## Handy options (`Arducam_frames.py`)
 
-| Option | Script | Meaning |
+| Option | Default | Meaning |
 |---|---|---|
-| `--vts N` | ov9281_init | Frame length in lines: 422 = fastest (~260 fps), 1422 = 77 fps |
-| `--exposure N` | ov9281_init | Exposure in lines (9.12 µs each), at most VTS − 25 |
-| `--gain N` | ov9281_init | 16 = 1×, 32 = 2×, 64 = 4×, 128 = 8× |
-| `--pattern` | ov9281_init | Test pattern instead of the image |
-| `--crop X0:X1` | trackers | Keep only columns X0..X1 (the table); rounded to multiples of 4 |
-| `--log file.csv` | trackers | Save every tracked position |
-| `--fake` | trackers | Fake bouncing ball, no hardware needed |
-| `--safe-copy` | trackers | Use if Python dies with "Bus error" |
+| `--width --height --fps` | 640 480 200 | Camera mode |
+| `--exposure-us`, `--gain` | 500, 0 | Camera exposure and gain |
+| `--crop X0:X1` | none | Keep only the table's columns; `--bounds` is then in cropped pixels |
+| `--ball-radius` | 10 | Ball radius in pixels |
+| `--min-area --max-area` | 48 1600 | Blob size limits in pixels |
+| `--thresh` | 30 | Detector threshold (also a live slider on the page) |
+| `--px-scale` | 2 | Scales the tracker's pixel distances (2 for 640x480) |
+| `--log file.csv` | off | Save every tracked position |
+| `--port` | 8080 | Web page port (change it in the `ssh -L` command too) |
 
-Frame rate: at most ~130 tracked fps (every other camera frame), less if Python is slower.
+If the page's `dropped` count keeps climbing, the Kria can't decode 640x480 MJPEG fast enough: set the
+CPU governor to `performance` or lower `--fps`.
