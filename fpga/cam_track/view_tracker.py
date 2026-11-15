@@ -37,10 +37,10 @@ import numpy as np
 from cameraFrames import (IS_MAC, FrameGrabber, apply_controls, desired_controls,
                          device_label, exposure_units)
 from tracker import (BallDetector, BallTracker, DetectorConfig, TrackerConfig,
-                     SEARCH, TENTATIVE, TRACK, COAST)
+                     SEARCH, TENTATIVE, TRACK, COAST, HIDDEN)
 
 COLORS = {SEARCH: (60, 60, 230), TENTATIVE: (0, 220, 255),
-          TRACK: (80, 220, 80), COAST: (0, 150, 255)}
+          TRACK: (80, 220, 80), COAST: (0, 150, 255), HIDDEN: (230, 90, 200)}
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -53,14 +53,23 @@ def put(img, text, org, color=(255, 255, 255)):
     cv2.putText(img, text, org, FONT, 0.5, color, 1, cv2.LINE_AA)
 
 
-def render(gray, s, trk, det, trail, info, scale, show_mask, ready=True):
-    """Draw one display frame. Pure function of its inputs (easy to test headless)."""
+def render(gray, s, trk, det, trail, info, scale, show_mask, ready=True,
+           text=True, show_masks=True):
+    """
+    Draw one display frame. Pure function of its inputs (easy to test headless).
+    text=False leaves out the status lines (a web page can show them instead);
+    show_masks=False hides the mask tint (the masks still apply to detection).
+    """
     if show_mask and det.cfg.mode == "diff" and det.background is not None:
         base = cv2.convertScaleAbs(cv2.absdiff(gray, det.background), alpha=4.0)
     else:
         base = gray
     img = cv2.cvtColor(cv2.resize(base, None, fx=scale, fy=scale,
                                   interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
+
+    for mx0, my0, mx1, my1 in (det.cfg.masks if show_masks else ()):   # ignored regions: red tint
+        sub = img[int(my0 * scale):int(my1 * scale), int(mx0 * scale):int(mx1 * scale)]
+        sub[:] = (sub * 0.55 + np.array([40, 40, 210]) * 0.45).astype(np.uint8)
 
     def P(x, y):                       # pixel-center aware image -> display coords
         return int(round((x + 0.5) * scale)), int(round((y + 0.5) * scale))
@@ -91,6 +100,8 @@ def render(gray, s, trk, det, trail, info, scale, show_mask, ready=True):
             if ahead is not None:
                 cv2.circle(img, P(*ahead), 3, (255, 255, 255), -1, cv2.LINE_AA)
 
+    if not text:
+        return img
     state = s.state if (s is not None and ready) else "WAITING"
     put(img, state, (8, 20), COLORS.get(state, (255, 255, 255)))
     put(img, f"cam {info['cam_fps']:.0f} fps   track {info['proc_ms']:.2f} ms   "

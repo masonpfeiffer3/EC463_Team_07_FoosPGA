@@ -27,7 +27,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-SEARCH, TENTATIVE, TRACK, COAST = "SEARCH", "TENTATIVE", "TRACK", "COAST"
+SEARCH, TENTATIVE, TRACK, COAST, HIDDEN = "SEARCH", "TENTATIVE", "TRACK", "COAST", "HIDDEN"
 
 
 # ============================================================================
@@ -44,6 +44,8 @@ class DetectorConfig:
     min_fill: float = 0.35    # blob area / bbox area (a perfect disc is ~0.785)
     max_aspect: float = 2.5   # long bbox side / short side (rejects rods and arms)
     open_kernel: int = 3      # morphological opening to kill speckle; 1 disables
+    masks: tuple = ()         # ((x0, y0, x1, y1), ...): blobs CENTERED in one are ignored
+                              # (rods, heads, glints). Replace the whole tuple to change it.
 
 
 class BallDetector:
@@ -89,6 +91,7 @@ class BallDetector:
 
         n, _labels, stats, cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
         out = []
+        masks = c.masks           # one read: the web thread may swap the tuple
         for i in range(1, n):
             x, y, w, h, area = stats[i]
             if not (c.min_area <= area <= c.max_area):
@@ -97,7 +100,10 @@ class BallDetector:
                 continue
             if max(w, h) / float(min(w, h)) > c.max_aspect:
                 continue
-            out.append((float(cents[i, 0]) + x0, float(cents[i, 1]) + y0, int(area)))
+            cx, cy = float(cents[i, 0]) + x0, float(cents[i, 1]) + y0
+            if any(mx0 <= cx < mx1 and my0 <= cy < my1 for mx0, my0, mx1, my1 in masks):
+                continue
+            out.append((cx, cy, int(area)))
         return out
 
 
@@ -130,9 +136,10 @@ class BallKalman:
         self.x = np.zeros(4)
         self.P = np.eye(4)
 
-    def init(self, z):
+    def init(self, z, vel_std=None):
+        """Start at z with unknown velocity (std vel_std, default init_vel_std)."""
         self.x = np.array([z[0], z[1], 0.0, 0.0])
-        v2 = self.init_vel_std ** 2
+        v2 = (self.init_vel_std if vel_std is None else vel_std) ** 2
         self.P = np.diag([self.R[0, 0], self.R[1, 1], v2, v2])
 
     @staticmethod
@@ -209,6 +216,12 @@ class TrackerConfig:
                                       # (heads poke out past a thin rod mask)
     rod_dwell_s: float = 0.4      # a track on the same rod this long is a head: drop it
                                   # (a real ball crosses a rod in a few ms)
+    hidden_margin_px: float = 20.0  # ball under a rod zone: exit box = strip widened by this
+                                    # + kick_speed * frame gap, around the y where it went in
+    kick_speed_px_s: float = 4000.0 # fastest a foot can send the ball out from under a rod
+    drift_speed_px_s: float = 300.0 # exit box grows in y this fast (ball pinned and dragged)...
+    drift_max_px: float = 100.0     # ...up to this much
+    hidden_max_s: float = 3.0     # parked under a rod this long with no sighting -> SEARCH
     dt_min: float = 1e-4
     dt_max: float = 0.1
 
@@ -241,6 +254,23 @@ class BallTracker:
     so it is dropped with no reacquire window (which would just grab the
     same head again).
 
+    Under a rod (cfg.rod_zones are masked, so the ball is invisible there):
+    entered when a track misses while the ball (prediction or last sighting)
+    is within one ball radius of a strip. While under, every frame searches:
+      1. the prediction window (normal gate): a ball just passing through;
+      2. the exit box: strip +/- (hidden_margin + kick_speed * frame gap),
+         entry y +/- the same plus drift_speed * time under (up to drift_max_px).
+         A NEW blob here (not in the same spot last frame) is the ball coming
+         out, re-initialised with a kick-sized velocity spread;
+      3. the escape catcher: blob pairs over two frames, anywhere, that move
+         away from the strip and back-project into its y window (a kick too
+         fast to be seen in the exit box).
+    COAST     (transit) output is still the prediction, so a ball passing
+              through keeps moving. Becomes HIDDEN when the prediction leaves
+              the exit box unseen, the ball was slow, or coast_time_s passes.
+    HIDDEN    parked: output is a fixed guess (strip center x, entry y).
+              Nothing for hidden_max_s -> SEARCH.
+
     Pass your own BallKalman via `kalman`, otherwise one is built with `bounds`.
     """
 
@@ -262,6 +292,7 @@ class BallTracker:
         self.lost = None           # (roi, stamp) of the last lost track, for reacquiring
         self.zone = None           # index of the rod zone the last measurement was in
         self.zone_since = None     # stamp of the first consecutive measurement in that zone
+        self.under = None          # dict while the ball is under a rod (see _go_under)
 
     def _zone_at(self, x, y):
         """Index of the rod rectangle (x, y) is in or within the margin of, or None."""
@@ -270,6 +301,143 @@ class BallTracker:
             if x0 - m <= x <= x1 + m and y0 - m <= y <= y1 + m:
                 return i
         return None
+
+    def _zone_near(self, x, y, margin):
+        """The rod rectangle (x, y) is in or within `margin` of, or None."""
+        for r in self.cfg.rod_zones:
+            x0, y0, x1, y1 = r
+            if x0 - margin <= x <= x1 + margin and y0 - margin <= y <= y1 + margin:
+                return r
+        return None
+
+    # -- under a rod -------------------------------------------------------------
+
+    def _go_under(self, rect, stamp):
+        """The ball went under rod rectangle `rect`. Parks right away if it was slow."""
+        self.under = {"rect": rect, "y": self.last_z[1], "t": stamp,
+                      "park_t": None, "prev": None, "prev_all": None}
+        if math.hypot(self.kf.x[2], self.kf.x[3]) < self.cfg.slow_speed:
+            self.under["park_t"] = stamp
+            self.state = HIDDEN
+        else:
+            self.state = COAST
+
+    def _exit_box(self, stamp, dt, w, h):
+        """Where a ball leaving the strip can be seen on this frame; also its y window half-size."""
+        c, u = self.cfg, self.under
+        x0, _, x1, _ = u["rect"]
+        mx = c.hidden_margin_px + c.kick_speed_px_s * dt
+        my = mx + min(c.drift_speed_px_s * (stamp - u["t"]), c.drift_max_px)
+        bx0, bx1 = int(max(0, math.floor(x0 - mx))), int(min(w, math.ceil(x1 + mx)))
+        by0, by1 = int(max(0, math.floor(u["y"] - my))), int(min(h, math.ceil(u["y"] + my)))
+        return (bx0, by0, max(bx1, bx0 + 1), max(by1, by0 + 1)), my
+
+    def _hidden_out(self, stamp):
+        x0, _, x1, _ = self.under["rect"]
+        return TrackState(stamp, HIDDEN, (x0 + x1) / 2.0, float(self.under["y"]), 0.0, 0.0, False)
+
+    def _escape(self, outside, stamp, ywin):
+        """
+        A blob pair (last frame -> this frame), outside the exit box, moving away
+        from the strip faster than slow_speed and back-projecting into the strip's
+        y window: a kick too fast to be seen in the exit box. Returns (z, v) or None.
+        """
+        c, u = self.cfg, self.under
+        prev, u["prev"] = u["prev"], (stamp, outside)
+        if prev is None or not outside:
+            return None
+        pt, pc = prev
+        dtp = stamp - pt
+        if dtp <= 0 or not pc:
+            return None
+        x0, _, x1, _ = u["rect"]
+        mid = (x0 + x1) / 2.0
+        best, best_err = None, float("inf")
+        for cx, cy, _a in outside:
+            for px, py, _pa in pc:
+                vx, vy = (cx - px) / dtp, (cy - py) / dtp
+                speed = math.hypot(vx, vy)
+                if not (c.slow_speed < speed <= max(3.0 * c.kick_speed_px_s, 10000.0)):
+                    continue
+                side = 1.0 if cx > mid else -1.0
+                if vx * side <= 0 or abs(cx - mid) <= abs(px - mid):
+                    continue                          # not moving away from the strip
+                edge = x1 if side > 0 else x0
+                t_back = (cx - edge) / vx             # time since it crossed the strip edge
+                if t_back < 0 or t_back > stamp - u["t"] + dtp:
+                    continue
+                err = abs(cy - vy * t_back - u["y"])
+                if err <= ywin and err < best_err:
+                    best, best_err = ((cx, cy), (vx, vy)), err
+        return best
+
+    def _update_under(self, gray, stamp, w, h):
+        c, u = self.cfg, self.under
+        dt = min(max(stamp - self.last_stamp, c.dt_min), c.dt_max)
+        parked = u["park_t"] is not None
+        box, ywin = self._exit_box(stamp, dt, w, h)
+        if parked:
+            draw = box
+        else:
+            self.kf.predict(dt)
+            r = self._roi(w, h, stamp - self.last_meas)
+            draw = (min(box[0], r[0]), min(box[1], r[1]), max(box[2], r[2]), max(box[3], r[3]))
+        self.last_stamp = stamp
+        cands = self.det.detect(gray)               # whole frame: the escape catcher needs it
+        self.last_roi, self.last_cands = draw, cands
+
+        z = None
+        if not parked:                              # 1. just passing through
+            z = self._associate([k for k in cands if draw[0] <= k[0] < draw[2]
+                                 and draw[1] <= k[1] < draw[3]])
+            if z is not None:
+                self.kf.update(z)
+        prev_all, u["prev_all"] = u["prev_all"], cands
+        if z is None and prev_all is not None:      # 2. coming out of the exit box
+                                                    #    (not on the first frame under: no
+                                                    #    previous frame to tell new blobs by)
+            # only NEW blobs: one sitting in the same spot last frame is a head, not the ball
+            inside = [k for k in cands if box[0] <= k[0] < box[2] and box[1] <= k[1] < box[3]
+                      and not any(abs(k[0] - q[0]) < 2.0 and abs(k[1] - q[1]) < 2.0
+                                  for q in prev_all)]
+            if inside:
+                gx = (u["rect"][0] + u["rect"][2]) / 2.0
+                scale = max(box[2] - box[0], 1.0)
+                cx, cy, _ = min(inside, key=lambda k: math.hypot(k[0] - gx, k[1] - u["y"]) / scale
+                                + self._size_cost(k[2]))
+                z = (cx, cy)
+                self.kf.init(z, vel_std=c.kick_speed_px_s)
+            else:                                   # 3. kicked out too fast for the box
+                outside = [k for k in cands
+                           if not (box[0] <= k[0] < box[2] and box[1] <= k[1] < box[3])]
+                esc = self._escape(outside, stamp, ywin)
+                if esc is not None:
+                    z, v = esc
+                    self.kf.init(z, vel_std=c.kick_speed_px_s / 4.0)
+                    self.kf.x[2], self.kf.x[3] = v
+        if z is not None:
+            self.under = None
+            self.last_meas, self.last_z = stamp, z
+            self.hits += 1
+            self.zone, self.zone_since = self._zone_at(z[0], z[1]), stamp
+            self.state = TRACK
+            return self._out(stamp, True)
+
+        if not parked:
+            speed = math.hypot(self.kf.x[2], self.kf.x[3])
+            if (not box[0] <= self.kf.x[0] < box[2] or speed < c.slow_speed
+                    or stamp - self.last_meas > c.coast_time_s):
+                u["park_t"] = stamp                 # it should be out by now: it stayed under
+                self.state = HIDDEN
+                return self._hidden_out(stamp)
+            self.state = COAST
+            return self._out(stamp, False)
+        if stamp - u["park_t"] > c.hidden_max_s:    # never came out: search wider again
+            lost = (box, stamp)
+            self.reset()
+            self.lost = lost
+            return TrackState(stamp, SEARCH)
+        return self._hidden_out(stamp)
 
     def _lose(self, stamp, w, h):
         """Drop to SEARCH, remembering where to look first."""
@@ -342,6 +510,9 @@ class BallTracker:
             self.last_z = (cx, cy)
             return self._out(stamp, True)
 
+        if self.under is not None:
+            return self._update_under(gray, stamp, w, h)
+
         dt = min(max(stamp - self.last_stamp, c.dt_min), c.dt_max)
         self.kf.predict(dt)
         roi = self._roi(w, h, stamp - self.last_meas)
@@ -374,6 +545,13 @@ class BallTracker:
                 self._lose(stamp, w, h)
                 return TrackState(stamp, SEARCH)
             return self._out(stamp, False)
+        if c.rod_zones:                               # lost right at a rod mask: it's under there
+            r = math.sqrt(c.ball_area / math.pi)
+            rect = (self._zone_near(self.kf.x[0], self.kf.x[1], r)
+                    or self._zone_near(self.last_z[0], self.last_z[1], r))
+            if rect is not None:
+                self._go_under(rect, stamp)
+                return self._hidden_out(stamp) if self.state == HIDDEN else self._out(stamp, False)
         slow = math.hypot(self.kf.x[2], self.kf.x[3]) < c.slow_speed
         if stamp - self.last_meas > (c.coast_time_slow_s if slow else c.coast_time_s):
             self._lose(stamp, w, h)                   # coasted too long: re-search

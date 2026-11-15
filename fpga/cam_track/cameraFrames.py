@@ -225,7 +225,7 @@ class FrameGrabber:
 
     LIVE = 400  # samples kept for the viewer (~2 s at 200 FPS)
 
-    def __init__(self, index, width, height, fps, fourcc, raw, queue_len=64):
+    def __init__(self, index, width, height, fps, fourcc, raw, queue_len=64, buffers=8):
         if IS_MAC:
             # No V4L2 on macOS; AVFoundation also ignores CONVERT_RGB, so
             # frames always arrive as BGR and to_gray() takes the cvtColor path.
@@ -245,7 +245,12 @@ class FrameGrabber:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, fps)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # often ignored; the thread is the real fix
+        # Number of V4L2 driver buffers. macOS ignores this, but on Linux it is
+        # honored, and 1 makes the driver DROP every frame that starts arriving
+        # while we still hold the previous one (seen on the Kria: 200 fps camera,
+        # only every 2nd-3rd frame delivered). The grab thread drains frames
+        # immediately, so more buffers cost no latency.
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, buffers)
         if raw:
             # Ask for the undecoded buffer. Not every OpenCV build honors
             # this; to_gray() copes either way.
@@ -390,11 +395,12 @@ def _benchmark():
     ap.add_argument("--exposure-us", type=float, default=500.0)
     ap.add_argument("--gain", type=int, default=0)
     ap.add_argument("--seconds", type=float, default=5.0)
+    ap.add_argument("--buffers", type=int, default=8, help="V4L2 driver buffers (1 drops frames)")
     args = ap.parse_args()
 
     dev = device_label(args.device)
     grabber = FrameGrabber(args.device, args.width, args.height, args.fps,
-                           args.fourcc, args.raw)
+                           args.fourcc, args.raw, buffers=args.buffers)
     print("negotiated:", grabber.negotiated())
     if not grabber.first_frame.wait(5.0):
         print("no frames within 5 s")
