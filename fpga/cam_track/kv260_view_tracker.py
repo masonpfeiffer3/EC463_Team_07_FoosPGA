@@ -58,7 +58,8 @@ class Live:
 # Tracking thread: the same loop as view_tracker.main(), minus the window
 # ============================================================================
 
-def tracking_loop(grabber, det, trk, live, args):
+def tracking_loop(grabber, det, trk, live, args, link=None):
+    # link: optional goalie_loop.GoalieLink, stepped once per frame (None = tracking only)
     trail = collections.deque(maxlen=args.trail)
     proc = collections.deque(maxlen=400)
     last_gray, last_state, show_mask = None, None, False
@@ -68,7 +69,11 @@ def tracking_loop(grabber, det, trk, live, args):
         while live.commands:
             k = live.commands.popleft()
             if k == "b":
+                if link:
+                    link.pause()         # motion off: this blocks for up to 5 s
                 learn_background(grabber, det)
+                if link:
+                    link.resume()
                 trk.reset()
                 trail.clear()
             elif k == "r":
@@ -78,6 +83,7 @@ def tracking_loop(grabber, det, trk, live, args):
                 show_mask = not show_mask
 
         ready = det.cfg.mode != "diff" or det.background is not None
+        stepped = False
         for _seq, stamp, gray in grabber.wait_frames(0.05):
             last_gray = gray
             if not ready:
@@ -85,6 +91,9 @@ def tracking_loop(grabber, det, trk, live, args):
             t0 = time.perf_counter()
             last_state = trk.update(gray, stamp)
             proc.append((time.perf_counter() - t0) * 1000.0)
+            if link:
+                link.step(last_state)
+                stepped = True
             if last_state.state == SEARCH:
                 trail.clear()
             elif last_state.x is not None:
@@ -93,6 +102,8 @@ def tracking_loop(grabber, det, trk, live, args):
                 s = last_state
                 args.log_file.write(f"{stamp:.6f},{s.state},{s.x},{s.y},{s.vx},{s.vy},{int(s.measured)}\n")
 
+        if link and not stepped:
+            link.step(None)              # no new frame: the goalie still needs a target
         if last_gray is None:
             continue
 

@@ -37,6 +37,7 @@ from http.server import ThreadingHTTPServer
 
 import numpy as np
 
+from goalie_loop import add_args as add_goalie_args, build_link
 from cameraFrames import (FrameGrabber, apply_controls, check_cpu_governor,
                           desired_controls, device_label, exposure_units)
 from kv260_view_tracker import Live, tracking_loop
@@ -157,6 +158,7 @@ def main():
     ap.add_argument("--jpeg-quality", type=int, default=80)
     ap.add_argument("--trail", type=int, default=120)
     ap.add_argument("--log", help="CSV of every tracker output: stamp,state,x,y,vx,vy,measured")
+    add_goalie_args(ap)
     args = ap.parse_args()
 
     dev = device_label(args.device)
@@ -194,13 +196,14 @@ def main():
                        grabber, det, trk, legacy_masks=args.masks_file)
     metrics = MetricsGrabber(grabber, args.metrics_log)    # counts every frame the tracker sees
     ui = types.SimpleNamespace(show_overlay=not args.overlay_off)
+    link = build_link(args, setup)                         # None unless --goalie sim|fpga
 
     args.log_file = open(args.log, "w", buffering=1) if args.log else None
     if args.log_file:
         args.log_file.write("stamp,state,x,y,vx,vy,measured\n")
 
     live = Live()
-    threading.Thread(target=tracking_loop, args=(metrics, det, trk, live, args), daemon=True).start()
+    threading.Thread(target=tracking_loop, args=(metrics, det, trk, live, args, link), daemon=True).start()
     threading.Thread(target=render_loop, args=(det, metrics, live, args, setup, ui),
                      daemon=True).start()
 
@@ -218,6 +221,8 @@ def main():
         pass
     finally:
         live.running = False
+        if link:
+            link.close()
         cam.release()
         metrics.close()
         if args.log_file:
